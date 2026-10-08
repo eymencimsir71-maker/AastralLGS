@@ -2,10 +2,10 @@
 <html lang="tr">
 <head>
 <meta charset="utf-8">
-<title>LGS Soru Defteri</title>
+<title>AstraLGS</title>
 <meta name="theme-color" content="#7c5cff">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="LGS">
+<meta name="apple-mobile-web-app-title" content="AstraLGS">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon.svg">
@@ -56,11 +56,14 @@ textarea.note{width:100%;margin-top:10px;font:inherit;color:var(--ink);backgroun
 </head>
 <body>
 <header>
-  <h1>LGS Soru Defteri</h1>
+  <h1>AstraLGS</h1>
   <p>Yeni nesil sorular, ders çalışması ve LGS simülesi</p>
 </header>
 <nav id="nav"></nav>
 <main id="v"></main>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script>
 const D={"Türkçe":"#b03a2e","Matematik":"#2f5d9e","Fen Bilimleri":"#2e7d4f","İnkılap Tarihi":"#9a6b12","Din Kültürü":"#1f6f6f","İngilizce":"#7a4a7a"};
 
@@ -480,7 +483,7 @@ const L="ABCD";
 const $=s=>document.querySelector(s);
 const st={
   get(k,d){try{const v=localStorage.getItem(k);return v?JSON.parse(v):d}catch(e){return d}},
-  set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
+  set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){} if(!syncing&&fbUser)scheduleSync()}
 };
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const shuf=a=>{const b=a.slice();for(let i=b.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[b[i],b[j]]=[b[j],b[i]]}return b};
@@ -612,8 +615,8 @@ function exportWrong(d){
   a.download="yanlislar.txt"; a.click();
 }
 
-const START={home:["home"],lgs:["subjects","lgs"],ders:["subjects","ders"],sim:["sim"],plan:["plan"]};
-const tabs=[["home","Ana sayfa"],["lgs","LGS Çalışma"],["ders","Ders Çalışma"],["sim","LGS Simülesi"],["plan","Planım"]];
+const START={home:["home"],lgs:["subjects","lgs"],ders:["subjects","ders"],sim:["sim"],plan:["plan"],account:["account"]};
+const tabs=[["home","Ana sayfa"],["lgs","LGS Çalışma"],["ders","Ders Çalışma"],["sim","LGS Simülesi"],["plan","Planım"],["account","Hesap"]];
 let timer=null, ex=null;
 const V={};
 
@@ -764,6 +767,34 @@ V.dmenu=(tab,m,d)=>{
   };
 };
 
+/* ---------- kişiye özel soru dizisi ---------- */
+// Her kişinin (üye ise hesabının, değilse bu cihaza özel) ayrı bir kimliği vardır.
+// Quiz ve simülasyon sorularını bu kimliğe göre karıştırır; böylece herkes farklı sorularla çalışır.
+function personalSeed(){
+  let id=localStorage.getItem("uid_local");
+  if(!id){ id=Math.random().toString(36).slice(2)+Date.now().toString(36); localStorage.setItem("uid_local",id); }
+  return fbUser?fbUser.uid:id;
+}
+function nextSeed(name){
+  const k="seq_"+name, n=st.get(k,0);
+  st.set(k,n+1);
+  return personalSeed()+":"+name+":"+n;
+}
+function hashStr(str){
+  let h=2166136261;
+  for(const c of str){ h^=c.charCodeAt(0); h=Math.imul(h,16777619); }
+  return h>>>0;
+}
+function rng(seedStr){
+  let s=hashStr(seedStr)||1;
+  return ()=>{ s^=s<<13; s^=s>>>17; s^=s<<5; s>>>=0; return s/4294967296; };
+}
+function seededShuffle(arr,r){
+  const b=arr.slice();
+  for(let i=b.length-1;i>0;i--){ const j=Math.floor(r()*(i+1)); [b[i],b[j]]=[b[j],b[i]]; }
+  return b;
+}
+
 const QUIZ_N=40;
 V.quiz=(tab,m,d,mode)=>{
   qz={tab,m,d,mode,list:[],queue:[],i:0,cur:null,score:0,streak:0,best:0,n:0,locked:false,log:[],tl:+st.get("dtime",25)};
@@ -775,7 +806,7 @@ V.quiz=(tab,m,d,mode)=>{
       qz=null; return;
     }
   } else {
-    qz.queue=shuf(DQN).slice(0,QUIZ_N);
+    qz.queue=seededShuffle(DQN,rng(nextSeed("quiz"))).slice(0,QUIZ_N);
   }
   $("#v").innerHTML=`
   <div class="row" style="margin-bottom:12px">
@@ -941,7 +972,8 @@ V.sim=()=>{
     <p class="mut" style="font-size:.9em">Dağılım: ${Object.entries(SIM_COUNT).map(([d,n])=>`${d} ${n}`).join(", ")}. Sorular her seferinde bankadan yeniden seçilir.</p>
     <button class="btn" id="go">Başla</button></div>`;
   $("#go").onclick=()=>{
-    const qs=shuf(Object.keys(SIM_COUNT).flatMap(d=>shuf(idsOf("lgs",d)).slice(0,SIM_COUNT[d])));
+    const sseed=nextSeed("sim");
+    const qs=shuf(Object.keys(SIM_COUNT).flatMap(d=>seededShuffle(idsOf("lgs",d),rng(sseed+d)).slice(0,SIM_COUNT[d])));
     ex={qs:shuf(qs),a:{},i:0,t:SIM_MIN*60};
     timer=setInterval(()=>{
       ex.t--;
@@ -1041,6 +1073,128 @@ document.addEventListener("keydown",e=>{
   if(!qz.locked&&e.key>="1"&&e.key<="4")answer(+e.key-1);
   else if(qz.locked&&e.key==="Enter")nextQ();
 });
+
+/* ---------- üyelik ve bulut eşitleme (Firebase) ---------- */
+const FB_CONFIG={apiKey:"BURAYA_API_KEY",authDomain:"BURAYA_PROJE.firebaseapp.com",projectId:"BURAYA_PROJE_ID",appId:"BURAYA_APP_ID"};
+const SYNC_KEYS=["sol","dsol","res","dwrong","notes","plan","days","goal","last","dtime","sound"];
+const fbReady=!FB_CONFIG.apiKey.startsWith("BURAYA")&&typeof firebase!=="undefined";
+let fb=null, fbUser=null, syncTimer=null, syncing=false;
+
+if(fbReady){
+  firebase.initializeApp(FB_CONFIG);
+  fb={auth:firebase.auth(), db:firebase.firestore()};
+  fb.auth.onAuthStateChanged(async u=>{
+    fbUser=u;
+    if(u){
+      try{ await pullCloud(); }catch(e){ setSyncStatus("Eşitleme yapılamadı"); }
+    }
+    const cur=document.querySelector("nav button.on");
+    if(cur&&cur.dataset.t==="account")go("account","account");
+  });
+}
+
+function cloudSnapshot(){
+  const o={};
+  SYNC_KEYS.forEach(k=>{const v=localStorage.getItem(k); if(v!==null)o[k]=v;});
+  return o;
+}
+function scheduleSync(){
+  clearTimeout(syncTimer);
+  setSyncStatus("Kaydediliyor...");
+  syncTimer=setTimeout(pushCloud,1500);
+}
+async function pushCloud(){
+  if(!fbUser)return;
+  try{
+    await fb.db.collection("users").doc(fbUser.uid).set({store:cloudSnapshot(),updated:Date.now()});
+    setSyncStatus("Eşitlendi");
+  }catch(e){ setSyncStatus("Kaydedilemedi, internet bağlantını kontrol et"); }
+}
+async function pullCloud(){
+  const ref=fb.db.collection("users").doc(fbUser.uid);
+  const snap=await ref.get();
+  syncing=true;
+  try{
+    if(snap.exists){
+      const d=snap.data().store||{};
+      SYNC_KEYS.forEach(k=>{ if(d[k]!==undefined)localStorage.setItem(k,d[k]); });
+    } else {
+      await ref.set({store:cloudSnapshot(),updated:Date.now()});
+    }
+  } finally { syncing=false; }
+  setSyncStatus("Eşitlendi");
+}
+function setSyncStatus(t){const e=$("#ss"); if(e)e.textContent=t;}
+function fbError(err){
+  const c=err&&err.code||"";
+  const map={
+    "auth/invalid-email":"Geçersiz e-posta adresi.",
+    "auth/weak-password":"Şifre en az 6 karakter olmalı.",
+    "auth/email-already-in-use":"Bu e-posta ile zaten üyelik var.",
+    "auth/invalid-credential":"E-posta veya şifre hatalı.",
+    "auth/wrong-password":"E-posta veya şifre hatalı.",
+    "auth/user-not-found":"E-posta veya şifre hatalı.",
+    "auth/too-many-requests":"Çok fazla deneme yapıldı, biraz bekle.",
+    "auth/network-request-failed":"İnternet bağlantısı yok."
+  };
+  return map[c]||("Hata: "+(err&&err.message||c));
+}
+
+V.account=()=>{
+  if(!fbReady){
+    $("#v").innerHTML=`<div class="box"><b>Üyelik</b><p class="mut">Üyelik sistemi henüz yapılandırılmadı. Uygulama üyeliksiz de tam olarak çalışır.</p></div>`;
+    return;
+  }
+  if(fbUser){
+    $("#v").innerHTML=`<div class="box">
+      <b>Hesabım</b>
+      <p style="margin:8px 0">${esc(fbUser.email)}</p>
+      <p class="mut" id="ss">Eşitlendi</p>
+      <div class="row" style="margin-top:12px">
+        <button class="btn o" id="sync">Şimdi eşitle</button>
+        <button class="btn" id="out">Çıkış yap</button>
+      </div></div>`;
+    $("#sync").onclick=async()=>{setSyncStatus("Eşitleniyor...");try{await pullCloud()}catch(e){setSyncStatus("Eşitlenemedi")}};
+    $("#out").onclick=()=>fb.auth.signOut();
+    return;
+  }
+  let mode="login";
+  const render=()=>{
+    $("#v").innerHTML=`<div class="box">
+      <div class="row">
+        <button class="btn ${mode==="login"?"":"o"}" id="m1">Giriş yap</button>
+        <button class="btn ${mode==="register"?"":"o"}" id="m2">Üye ol</button>
+      </div>
+      <div class="list" style="margin-top:12px">
+        <input id="em" type="email" placeholder="E-posta" style="width:100%">
+        <input id="pw" type="password" placeholder="Şifre (en az 6 karakter)" style="width:100%">
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" id="go2">${mode==="login"?"Giriş yap":"Üyeliği oluştur"}</button>
+        ${mode==="login"?'<button class="btn link" id="fp">Şifremi unuttum</button>':""}
+      </div>
+      <p id="msg" class="mut" style="margin-top:10px">Üyelik ücretsizdir. Üye olursan ilerlemen, notların ve yanlışların tüm cihazlarında görünür.</p>
+    </div>`;
+    $("#m1").onclick=()=>{mode="login";render()};
+    $("#m2").onclick=()=>{mode="register";render()};
+    $("#go2").onclick=async()=>{
+      const e=$("#em").value.trim(), p=$("#pw").value;
+      $("#msg").textContent="Lütfen bekle...";
+      try{
+        if(mode==="login")await fb.auth.signInWithEmailAndPassword(e,p);
+        else await fb.auth.createUserWithEmailAndPassword(e,p);
+      }catch(err){ $("#msg").textContent=fbError(err); }
+    };
+    const fp=$("#fp");
+    if(fp)fp.onclick=async()=>{
+      const e=$("#em").value.trim();
+      if(!e){$("#msg").textContent="Önce e-posta adresini yaz.";return}
+      try{ await fb.auth.sendPasswordResetEmail(e); $("#msg").textContent="Şifre sıfırlama bağlantısı e-postana gönderildi."; }
+      catch(err){ $("#msg").textContent=fbError(err); }
+    };
+  };
+  render();
+};
 
 go("home","home");
 </script>
